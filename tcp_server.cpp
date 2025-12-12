@@ -1,26 +1,50 @@
-//
-// Created by vladislav on 05.12.2025.
-//
-
 #include "tcp_server.h"
 
-tcp_server::tcp_server(boost::asio::io_context& context)
-        : context_(context),
-    acceptor_(context, tcp::endpoint(tcp::v4(), 13)) {
-    start_accept();
+#include <iostream>
+
+#include "tcp_connection.h"
+
+tcp_server::tcp_server(boost::asio::io_context& io_context, unsigned short port) :
+    io_context_(io_context), acceptor_(io_context, tcp::endpoint(tcp::v4(), port)) {
+    std::cout << "[Server] Listener started on port " << port << '\n';
 }
 
-void tcp_server::start_accept() {
-    tcp_connection::pointer new_connection = tcp_connection::create(context_);
-    acceptor_.async_accept(new_connection->socket(),
-        [this, new_connection](const boost::system::error_code& err) {
-            handle_accept(new_connection, err);
-        });
+void tcp_server::start_accept() { do_accept(); }
+
+void tcp_server::do_accept() {
+    auto new_socket = std::make_shared<tcp::socket>(io_context_);
+
+    acceptor_.async_accept(*new_socket, [self = shared_from_this(),
+                                    new_socket](const boost::system::error_code& error) {
+        auto server = std::static_pointer_cast<tcp_server>(self);
+        if (!error) {
+            auto new_connection = std::make_shared<tcp_connection>(std::move(*new_socket), server);
+            server->connections_.insert(new_connection);
+            new_connection->start();
+        } else {
+            std::cerr << "Accept error: " << error.message() << '\n';
+        }
+        server->do_accept();
+    });
 }
 
-void tcp_server::handle_accept(const tcp_connection::pointer& new_connection,
-    const boost::system::error_code &err) {
-    if (!err)
-        new_connection->start();
-    start_accept();
+void tcp_server::do_broadcast(const std::string& message, std::shared_ptr<tcp_connection> sender) {
+    std::string full_msg = "[Client " + sender->id_ + "]: " + message;
+    std::cout << "[Broadcast] Sending: " << full_msg << std::endl;
+
+    for (const auto& session: connections_) {
+        if (session != sender) {
+            session->deliver(full_msg);
+        }
+    }
+}
+
+void tcp_server::OnMessageReceived(std::shared_ptr<tcp_connection> session, const std::string& message) {
+    do_broadcast(message, session);
+}
+
+void tcp_server::OnDisconnected(std::shared_ptr<tcp_connection> session) {
+    session->close();
+    connections_.erase(session);
+    std::cout << "[Server] Session " << session->id_ << " removed. Active sessions: " << connections_.size() << '\n';
 }
